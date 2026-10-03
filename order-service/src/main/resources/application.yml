@@ -1,0 +1,99 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    # Dentro del compose: postgres:5432. Con mvn desde el host: localhost:5433,
+    # el puerto publicado (el 5432 del host suele ser un postgres local).
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/order_db
+    username: ${DB_USER:order_svc}
+    password: ${DB_PASSWORD:order_svc}
+  web:
+    # Locale fijo: los mensajes de Bean Validation salen en español sin depender
+    # del Accept-Language del cliente.
+    locale: es
+    locale-resolver: fixed
+  jpa:
+    # El esquema lo define Flyway; Hibernate solo verifica que las entidades coincidan.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+# Servicios hoja. El compose pasa los nombres de la red interna; los defaults
+# son para correr con mvn desde el host.
+clients:
+  connect-timeout: 1s
+  # Patrón Timeout: una dependencia colgada no retiene el hilo más de esto.
+  read-timeout: 2s
+  payment:
+    url: ${PAYMENT_URL:http://localhost:8082}
+  inventory:
+    url: ${INVENTORY_URL:http://localhost:8083}
+  shipping:
+    url: ${SHIPPING_URL:http://localhost:8084}
+
+resilience4j:
+  circuitbreaker:
+    # CB afuera, Retry adentro: el circuito ve UNA operación lógica por llamada,
+    # con todos sus reintentos. En Spring Boot 3 el default puede dejar al Retry
+    # afuera, y entonces cada reintento cuenta como un fallo aparte y el
+    # circuito abre al doble de velocidad de lo configurado.
+    circuitBreakerAspectOrder: 1
+    configs:
+      default:
+        # Los cuatro valores que exige el enunciado:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+        # Sin mínimo, una sola falla en la primera llamada ya es 100% y abre.
+        minimumNumberOfCalls: 5
+        # Para que chaos SLOW también abra el circuito, por lentitud y no por error.
+        slowCallRateThreshold: 50
+        slowCallDurationThreshold: 2s
+        # Pasa a HALF_OPEN a los 10s aunque no llegue tráfico: se ve en el panel.
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        # false a propósito. Con true, un CB abierto pone /actuator/health en
+        # DOWN y el healthcheck del compose marcaría al ORQUESTADOR como caído
+        # porque cayó una dependencia: justo la cascada que el CB existe para
+        # cortar (y la razón por la que el ChaosFilter excluye /actuator). El
+        # estado de los CBs se ve en /actuator/circuitbreakers y /resilience.
+        registerHealthIndicator: false
+        # Un "no" de negocio (4xx) es la respuesta de un servicio sano: no cuenta
+        # como fallo. Diez pedidos de un producto agotado no deben apagar el
+        # inventario para todos.
+        ignoreExceptions:
+          - gt.cunoc.sa.order.saga.BusinessException
+    instances:
+      paymentCB:
+        baseConfig: default
+      inventoryCB:
+        baseConfig: default
+      shippingCB:
+        baseConfig: default
+  retry:
+    retryAspectOrder: 2
+    configs:
+      default:
+        # Seguro solo porque las acciones de los servicios hoja son idempotentes
+        # por orderId: "no llegó respuesta" no significa "no se ejecutó".
+        maxAttempts: 2
+        waitDuration: 300ms
+        ignoreExceptions:
+          - gt.cunoc.sa.order.saga.BusinessException
+    instances:
+      paymentCB:
+        baseConfig: default
+      inventoryCB:
+        baseConfig: default
+      shippingCB:
+        baseConfig: default
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,circuitbreakers,circuitbreakerevents

@@ -1,0 +1,28 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    # Dentro del compose: postgres:5432. Con mvn desde el host: localhost:5433,
+    # el puerto publicado (el 5432 del host suele ser un postgres local).
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/inventory_db
+    username: ${DB_USER:inventory_svc}
+    password: ${DB_PASSWORD:inventory_svc}
+  web:
+    # Locale fijo: los mensajes de Bean Validation salen en español sin depender
+    # del Accept-Language del cliente (el orquestador no manda ninguno).
+    locale: es
+    locale-resolver: fixed
+  jpa:
+    # El esquema lo define Flyway; Hibernate solo verifica que las entidades coincidan.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

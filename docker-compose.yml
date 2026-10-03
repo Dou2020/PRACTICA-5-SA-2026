@@ -1,0 +1,129 @@
+# PRACTICA 5 — Saga (orquestación) + Circuit Breaker
+#
+# Un solo postgres con cuatro bases (db/init.sql): "database per service" sin
+# levantar cuatro contenedores. Cada servicio solo tiene credenciales de la suya.
+#
+# Puertos 808x: el 5000 lo usan PRACTICA_1 y PRACTICA_2. Postgres se publica
+# en el 5433 del host porque el 5432 suele estar tomado por un postgres local;
+# adentro de la red de compose sigue siendo postgres:5432.
+#
+# Los healthchecks van contra /actuator/health, que el filtro de chaos NO
+# intercepta: con chaos en ERROR el servicio sigue "healthy" para Docker. Es lo
+# que se quiere — el fallo simulado es de la API, no del proceso, y el que tiene
+# que detectarlo es el Circuit Breaker del orquestador, no el orquestador de
+# contenedores.
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 20s
+
+x-db-env: &db-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Solo corre la primera vez (volumen vacío). Para recrear: docker compose down -v
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  payment-service:
+    build: ./payment-service
+    ports:
+      - "8082:8082"
+    environment: *db-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8082/actuator/health"]
+      <<: *healthcheck
+
+  inventory-service:
+    build: ./inventory-service
+    ports:
+      - "8083:8083"
+    environment: *db-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/actuator/health"]
+      <<: *healthcheck
+
+  shipping-service:
+    build: ./shipping-service
+    ports:
+      - "8084:8084"
+    environment: *db-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8084/actuator/health"]
+      <<: *healthcheck
+
+  # El orquestador. Espera a los otros tres solo para que la demo arranque
+  # limpia; en ejecución no depende de que estén vivos — para eso está el
+  # Circuit Breaker (Fase 4).
+  order-service:
+    build: ./order-service
+    ports:
+      - "8081:8081"
+    environment:
+      <<: *db-env
+      PAYMENT_URL: http://payment-service:8082
+      INVENTORY_URL: http://inventory-service:8083
+      SHIPPING_URL: http://shipping-service:8084
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      shipping-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8081/actuator/health"]
+      <<: *healthcheck
+
+  # Panel de la demo: nginx sirve el build de React y hace de proxy a /api.
+  # Espera a los cuatro servicios solo para arrancar limpio; nginx resuelve los
+  # nombres en cada request (ver frontend/nginx.conf), así que después tolera
+  # que se pare y se vuelva a levantar cualquiera de ellos.
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      shipping-service:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1 y no localhost: en alpine localhost puede resolver a ::1 y
+      # nginx escucha solo en IPv4.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      <<: *healthcheck
+
+volumes:
+  pgdata:
